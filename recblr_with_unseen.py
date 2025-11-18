@@ -47,11 +47,15 @@ class RecBLRWithUnseen(RecBLR):
 
         self.unseen_handler: Optional[UnseenItemHandler] = None
         self.unseen_handling_enabled = False
+        self.use_preprocessing = False  # Flag for preprocessing only
+        self.use_postprocessing = False  # Flag for postprocessing only
         self._all_item_tokens = None  # Will store all item tokens for mapping
 
     def enable_unseen_handling(
         self,
         unseen_handler: UnseenItemHandler,
+        use_preprocessing: bool = True,
+        use_postprocessing: bool = True,
         verbose: bool = True
     ):
         """
@@ -59,13 +63,17 @@ class RecBLRWithUnseen(RecBLR):
 
         Args:
             unseen_handler: A fitted UnseenItemHandler instance
+            use_preprocessing: Whether to apply preprocessing (map unseen → known items in input)
+            use_postprocessing: Whether to apply postprocessing (extend scores to unseen items)
             verbose: Whether to print status information
         """
         if unseen_handler.X is None:
             raise ValueError("UnseenItemHandler must be fitted before enabling")
 
         self.unseen_handler = unseen_handler
-        self.unseen_handling_enabled = True
+        self.use_preprocessing = use_preprocessing
+        self.use_postprocessing = use_postprocessing
+        self.unseen_handling_enabled = use_preprocessing or use_postprocessing
 
         # Cache all item tokens for mapping
         self._all_item_tokens = [
@@ -74,7 +82,14 @@ class RecBLRWithUnseen(RecBLR):
         ]
 
         if verbose:
-            print("✓ Unseen item handling enabled for RecBLR")
+            mode_str = []
+            if use_preprocessing:
+                mode_str.append("preprocessing")
+            if use_postprocessing:
+                mode_str.append("postprocessing")
+            mode_description = " + ".join(mode_str) if mode_str else "disabled"
+
+            print(f"✓ Unseen item handling enabled for RecBLR ({mode_description})")
             print(f"  - Model vocabulary: {self.n_items - 1} items")
             print(f"  - Total item catalog: {len(self._all_item_tokens)} items")
             print(f"  - Coverage: {len(unseen_handler.valid_items)}/{len(self._all_item_tokens)}")
@@ -82,6 +97,8 @@ class RecBLRWithUnseen(RecBLR):
     def disable_unseen_handling(self):
         """Disable unseen item handling (revert to standard RecBLR behavior)."""
         self.unseen_handling_enabled = False
+        self.use_preprocessing = False
+        self.use_postprocessing = False
 
     def _preprocess_item_sequence(self, item_seq_tokens):
         """
@@ -121,18 +138,18 @@ class RecBLRWithUnseen(RecBLR):
         """
         Full-sort prediction with optional unseen item handling.
 
-        If unseen handling is enabled:
-        1. Preprocesses sequences to replace unseen items
-        2. Gets predictions from RecBLR for known items
-        3. Postprocesses to extend scores to all items
+        Depending on flags:
+        - use_preprocessing=True: Preprocesses sequences to replace unseen items
+        - use_postprocessing=True: Postprocesses to extend scores to all items
+        - Both=True: Full preprocessing + postprocessing pipeline
 
         Args:
             interaction: RecBole interaction dict
 
         Returns:
             Scores tensor:
-            - If unseen handling disabled: shape (batch_size, n_items)
-            - If unseen handling enabled: shape (batch_size, total_catalog_size)
+            - If unseen handling disabled or preprocessing-only: shape (batch_size, n_items)
+            - If postprocessing enabled: shape (batch_size, total_catalog_size)
         """
         if not self.unseen_handling_enabled:
             # Standard RecBLR prediction
@@ -142,28 +159,95 @@ class RecBLRWithUnseen(RecBLR):
         item_seq = interaction[self.ITEM_SEQ]  # (batch_size, max_len)
         item_seq_len = interaction[self.ITEM_SEQ_LEN]  # (batch_size,)
 
-        batch_size = item_seq.shape[0]
+        # Preprocessing: Map unseen items to known items in input sequences
+        if self.use_preprocessing:
+            # Create a copy of interaction with preprocessed sequences
+            interaction = dict(interaction)  # Make mutable copy
+            item_seq_preprocessed = self._preprocess_sequences(item_seq)
+            interaction[self.ITEM_SEQ] = item_seq_preprocessed
+            interaction[self.ITEM_SEQ_LEN] = item_seq_len
 
-        # Preprocess sequences (map unseen → known items)
-        # Note: We need to convert token IDs to actual item tokens
-        item_seq_np = item_seq.cpu().numpy()
-
-        # Get original RecBLR predictions for valid items
-        # (We still use the original sequence since RecBole handles this internally)
+        # Get RecBLR predictions for valid items
         valid_scores = super(RecBLRWithUnseen, self).full_sort_predict(interaction)
-        valid_scores = valid_scores.cpu().numpy()  # (batch_size, n_items)
+
+        # Postprocessing: Extend scores to full catalog
+        if not self.use_postprocessing:
+            # Return standard scores (no postprocessing)
+            return valid_scores
+
+        # Apply postprocessing to extend to all items
+        valid_scores_np = valid_scores.cpu().numpy()  # (batch_size, n_items)
 
         # Remove padding item (index 0) from scores
-        valid_scores = valid_scores[:, 1:]  # (batch_size, n_items - 1)
+        valid_scores_np = valid_scores_np[:, 1:]  # (batch_size, n_items - 1)
 
         # Postprocess: Extend scores to all items (including unseen)
-        all_scores = self.unseen_handler.postprocess_batch(valid_scores)
+        all_scores = self.unseen_handler.postprocess_batch(valid_scores_np)
         # (batch_size, total_items)
 
         # Convert back to tensor
         all_scores_tensor = torch.from_numpy(all_scores).float().to(item_seq.device)
 
         return all_scores_tensor
+
+    def _preprocess_sequences(self, item_seq):
+        """
+        Preprocess item sequences by mapping unseen items to known items.
+
+        Args:
+            item_seq: Tensor of item sequences (batch_size, max_len)
+
+        Returns:
+            Preprocessed item sequences tensor (batch_size, max_len)
+        """
+        batch_size, max_len = item_seq.shape
+        device = item_seq.device
+
+        # Convert to CPU for processing
+        item_seq_cpu = item_seq.cpu().numpy()
+        preprocessed = []
+
+        for seq in item_seq_cpu:
+            # Convert token IDs to item tokens
+            seq_tokens = []
+            for idx in seq:
+                if idx == 0:  # Padding
+                    seq_tokens.append('[PAD]')
+                else:
+                    token = self.field2id_token[self.ITEM_ID].get(idx, '[PAD]')
+                    seq_tokens.append(token)
+
+            # Preprocess the sequence
+            # Add dummy last item for preprocessing
+            if len([t for t in seq_tokens if t != '[PAD]']) > 0:
+                # Get non-padding items
+                non_pad = [t for t in seq_tokens if t != '[PAD]']
+                non_pad.append(non_pad[-1])  # Add dummy
+                valid_seq = self.unseen_handler.preprocess_sequence(non_pad)
+                if valid_seq != ['[PAD]']:
+                    valid_seq = valid_seq[:-1]  # Remove dummy
+            else:
+                valid_seq = ['[PAD]']
+
+            # Convert back to IDs and pad to max_len
+            valid_ids = []
+            for token in valid_seq:
+                if token == '[PAD]':
+                    valid_ids.append(0)
+                else:
+                    valid_ids.append(self.field2token_id[self.ITEM_ID].get(token, 0))
+
+            # Pad to max_len
+            if len(valid_ids) < max_len:
+                valid_ids = [0] * (max_len - len(valid_ids)) + valid_ids
+            elif len(valid_ids) > max_len:
+                valid_ids = valid_ids[-max_len:]
+
+            preprocessed.append(valid_ids)
+
+        # Convert to tensor
+        preprocessed_tensor = torch.tensor(preprocessed, dtype=item_seq.dtype, device=device)
+        return preprocessed_tensor
 
     def predict(self, interaction):
         """
