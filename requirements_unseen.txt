@@ -1,0 +1,14 @@
+# Requirements for Unseen Item Handling in RecBLR
+
+# Core dependencies (already required by RecBLR/RecBole)
+torch>=1.10.0
+numpy>=1.17.2
+pandas>=1.4.0
+recbole>=1.2.0
+
+# Additional dependencies for unseen item handling
+scikit-learn>=0.23.2  # For TfidfVectorizer, TruncatedSVD, cosine_similarity
+scipy>=1.6.0          # For sparse matrices
+
+# Optional dependencies
+tqdm>=4.48.2          # For progress bars in evaluation
