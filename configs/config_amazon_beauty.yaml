@@ -1,7 +1,15 @@
 gpu_id: '0'
 
+# Model selection
+model_to_use: 'R' # 'B' for Bert4rec, 'R' for RecBLR
+
+# RecBLR architecture flags
+bd_lru_only: False
+disable_conv1d: False
+disable_ffn: False
+
 # RecBLR settings
-hidden_size: 64                 # (int) Number of features in the hidden state. 
+hidden_size: 64                 # (int) Number of features in the hidden state.
 num_layers: 2                   # (int) Number of Recurrent layers.
 dropout_prob: 0.2               # (float) Dropout rate.
 loss_type: 'CE'                 # (str) Type of loss function. Range in ['BPR', 'CE'].

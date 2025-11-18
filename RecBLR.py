@@ -25,6 +25,14 @@ class RecBLR(SequentialRecommender):
         self.dropout_prob = config["dropout_prob"]
         self.expand = config["expand"]
         self.d_conv = config["d_conv"]
+        self.bd_lru_only = config["bd_lru_only"]
+        self.disable_conv1d = config["disable_conv1d"]
+        self.disable_ffn = config["disable_ffn"]
+
+        # If bd_lru_only is True, disable Conv1D and FFN
+        if self.bd_lru_only:
+            self.disable_conv1d = True
+            self.disable_ffn = True
 
         self.item_embedding = nn.Embedding(
             self.n_items, self.hidden_size, padding_idx=0
@@ -40,6 +48,9 @@ class RecBLR(SequentialRecommender):
                 expand=self.expand,
                 dropout=self.dropout_prob,
                 num_layers=self.num_layers,
+                bd_lru_only=self.bd_lru_only,
+                disable_conv1d=self.disable_conv1d,
+                disable_ffn=self.disable_ffn,
             ) for _ in range(self.num_layers)
         ])
         
@@ -111,13 +122,16 @@ class RecBLR(SequentialRecommender):
         return scores
     
 class RecurrentLayer(nn.Module):
-    def __init__(self, d_model, d_conv, expand, dropout, num_layers):
+    def __init__(self, d_model, d_conv, expand, dropout, num_layers, bd_lru_only, disable_conv1d, disable_ffn):
         super().__init__()
         self.num_layers = num_layers
+        self.disable_ffn = disable_ffn
         self.behavior_modeling = GatedRecurrentLayer(
                 d_model=d_model, 
                 expansion_factor=expand, 
-                kernel_size=d_conv
+                kernel_size=d_conv,
+                bd_lru_only=bd_lru_only,
+                disable_conv1d=disable_conv1d
             )
         self.dropout = nn.Dropout(dropout)
         self.layer_norm = nn.LayerNorm(d_model, eps=1e-12)
@@ -126,13 +140,16 @@ class RecurrentLayer(nn.Module):
     def forward(self, input_tensor):
         hidden_states = self.behavior_modeling(input_tensor)
         hidden_states = self.layer_norm(self.dropout(hidden_states) + input_tensor)
-        hidden_states = self.ffn(hidden_states)
+        if not self.disable_ffn:
+            hidden_states = self.ffn(hidden_states)
         return hidden_states
 
     
 class GatedRecurrentLayer(nn.Module):
-    def __init__(self, d_model=64, expansion_factor=2, kernel_size=4):
+    def __init__(self, d_model=64, expansion_factor=2, kernel_size=4, bd_lru_only=False, disable_conv1d=False):
         super().__init__()
+        self.bd_lru_only = bd_lru_only
+        self.disable_conv1d = disable_conv1d
         log_1 = math.log(1)
         r_min, r_max = 0.9, 0.999
         l_value = -math.log(r_min) / math.exp(log_1)
@@ -162,7 +179,9 @@ class GatedRecurrentLayer(nn.Module):
             x = F.pad(x, (0, 0, pad_len, 0), mode='constant', value=0)
         
         # temporal conv1d with causal padding
-        if causal_conv1d_fn is None:
+        if self.disable_conv1d:
+            x = x # no temporal convolution
+        elif causal_conv1d_fn is None:
             x = F.silu(self.conv1d(x.mT)[..., :seq_len+pad_len].mT)
         else:
         # temporal conv1d with CUDA optimization
@@ -206,5 +225,3 @@ class FeedForward(nn.Module):
         hidden_states = self.layer_norm(hidden_states + input_tensor)
 
         return hidden_states
-    
-    
