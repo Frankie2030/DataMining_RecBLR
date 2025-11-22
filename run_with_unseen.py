@@ -150,7 +150,7 @@ def prepare_hm_data(config):
     # Construct file path
     dataset_name = config['dataset']
     data_path = config['data_path']
-    inter_file = os.path.join(data_path, dataset_name, f'{dataset_name}.inter')
+    inter_file = os.path.join(data_path, f'{dataset_name}.inter')
     
     if not os.path.exists(inter_file):
         raise FileNotFoundError(f"Interaction file not found: {inter_file}")
