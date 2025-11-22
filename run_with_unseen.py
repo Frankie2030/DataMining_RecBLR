@@ -209,12 +209,28 @@ def prepare_hm_data(config):
     print(f"Val set:   {len(val_df)} interactions, {val_df[user_col].nunique()} users")
     print(f"Test set:  {len(test_df)} interactions, {test_df[user_col].nunique()} users")
     
+    # Save all three splits as separate files for reproducibility
+    base_path = inter_file.replace('.inter', '')
+    train_file_separate = f"{base_path}_train.inter"
+    val_file_separate = f"{base_path}_val.inter"
+    test_file_separate = f"{base_path}_test.inter"
+    
+    print(f"Saving train split to {train_file_separate}...")
+    train_df.to_csv(train_file_separate, sep='\t', index=False)
+    
+    print(f"Saving val split to {val_file_separate}...")
+    val_df.to_csv(val_file_separate, sep='\t', index=False)
+    
+    print(f"Saving test split to {test_file_separate}...")
+    test_df.to_csv(test_file_separate, sep='\t', index=False)
+    
     # Save train+val for RecBole (it will use leave-one-out on this for internal validation)
     # But we'll do our own evaluation on the held-out test users
     train_val_df = pd.concat([train_df, val_df], ignore_index=True)
     train_file = inter_file
-    print(f"Saving train+val split to {train_file}...")
+    print(f"Saving train+val split to {train_file} (for RecBole)...")
     train_val_df.to_csv(train_file, sep='\t', index=False)
+    
     
     return test_df, val_df, user_col, item_col, ts_col
 
