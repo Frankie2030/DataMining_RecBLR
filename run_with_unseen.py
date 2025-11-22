@@ -432,6 +432,10 @@ if __name__ == '__main__':
     if convert2valid is not None and args.mode in ['pre', 'both']:
         print("Mapping unseen items in test sequences (preprocessing)...")
         
+        # Track how many items were mapped
+        mapping_stats = {'original_unseen': 0, 'total': 0, 'mapped': 0}
+        valid_items_set_check = set(dataset.id2token(dataset.iid_field, range(1, dataset.item_num)))
+        
         # H&M-style: map sequence[:-1] to valid items, keep last item as target
         def to_valid_list(item_list):
             """Map unseen items to similar valid items (H&M style)"""
@@ -439,16 +443,28 @@ if __name__ == '__main__':
             # Map all items except the last one (which is the target)
             for i in range(len(item_list) - 1):
                 item = item_list[i]
+                mapping_stats['total'] += 1
+                if item not in valid_items_set_check:
+                    mapping_stats['original_unseen'] += 1
+                    mapping_stats['mapped'] += 1
                 valid_list.append(convert2valid(item))
             return ['[PAD]'] if len(valid_list) == 0 else valid_list
         
         test_sequence["item_id_list_tokens"] = test_sequence["sequence"].apply(to_valid_list)
+        
+        # Report mapping statistics
+        if mapping_stats['original_unseen'] > 0:
+            print(f"Preprocessing: Mapped {mapping_stats['original_unseen']}/{mapping_stats['total']} " +
+                  f"({100*mapping_stats['original_unseen']/mapping_stats['total']:.2f}%) unseen items to similar valid items")
+        else:
+            print(f"Preprocessing: All {mapping_stats['total']} items were already in training vocabulary")
     else:
         print("No preprocessing - using raw sequences (unseen items might be dropped/padded)")
         # H&M style: use all items except last as input
         test_sequence["item_id_list_tokens"] = test_sequence["sequence"].apply(
             lambda seq: seq[:-1] if len(seq) > 1 else ['[PAD]']
         )
+    
     
     # Convert tokens to IDs
     print("Converting tokens to IDs...")
