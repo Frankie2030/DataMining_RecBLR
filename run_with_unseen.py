@@ -18,6 +18,11 @@ from logging import getLogger
 import argparse
 import os
 import pandas as pd
+import shutil
+from sklearn.model_selection import train_test_split
+import torch
+import numpy as np
+from recbole.data.interaction import Interaction
 
 from recbole.utils import init_logger, init_seed
 from recbole.trainer import Trainer
@@ -134,6 +139,76 @@ def create_item_features_for_dataset(dataset_name, dataset_path='dataset'):
     return None
 
 
+def prepare_hm_data(config):
+    """
+    Prepare data using H&M competition strategy:
+    1. Filter by timestamp (last 1/64th)
+    2. Split users 80/20 (Train/Test)
+    3. Save train split for RecBole training
+    4. Return test split dataframe for manual evaluation
+    """
+    print("Preparing data with H&M-style splitting...")
+    
+    # Construct file path
+    dataset_name = config['dataset']
+    data_path = config['data_path']
+    inter_file = os.path.join(data_path, dataset_name, f'{dataset_name}.inter')
+    
+    if not os.path.exists(inter_file):
+        raise FileNotFoundError(f"Interaction file not found: {inter_file}")
+        
+    # Read data
+    print(f"Reading {inter_file}...")
+    df = pd.read_csv(inter_file, sep='\t')
+    
+    # Identify columns
+    ts_col = next((c for c in df.columns if 'timestamp' in c), None)
+    user_col = next((c for c in df.columns if 'user' in c), None)
+    item_col = next((c for c in df.columns if 'item' in c), None)
+    
+    if not all([ts_col, user_col, item_col]):
+        raise ValueError(f"Could not identify all required columns (user, item, timestamp). Found: {df.columns}")
+        
+    # 1. Filter by timestamp (last 1/64th)
+    print("Filtering by timestamp (last 1/64th)...")
+    # Ensure timestamp is numeric
+    # df[ts_col] = pd.to_numeric(df[ts_col], errors='coerce') 
+    # Assuming it's already float/int based on RecBole format, but let's be safe
+    
+    quantile_val = df[ts_col].quantile(1 - 1/64)
+    data = df[df[ts_col] > quantile_val].copy()
+    print(f"Filtered data size: {len(data)} (Original: {len(df)})")
+    
+    # 2. Split users
+    print("Splitting users 80/20...")
+    user_seqs = data.groupby(user_col)[item_col].agg(list).reset_index()[user_col]
+    train_ids, test_ids = train_test_split(user_seqs, test_size=0.2, random_state=42)
+    
+    train_df = data[data[user_col].isin(train_ids)].copy()
+    test_df = data[data[user_col].isin(test_ids)].copy()
+    
+    print(f"Train set: {len(train_df)} interactions, {train_df[user_col].nunique()} users")
+    print(f"Test set: {len(test_df)} interactions, {test_df[user_col].nunique()} users")
+    
+    # 3. Save train split
+    temp_dir = os.path.join('dataset', 'temp_hm_split')
+    temp_dataset_name = 'hm_train'
+    output_dir = os.path.join(temp_dir, temp_dataset_name)
+    
+    if os.path.exists(output_dir):
+        shutil.rmtree(output_dir)
+    os.makedirs(output_dir)
+    
+    train_file = os.path.join(output_dir, f'{temp_dataset_name}.inter')
+    print(f"Saving train split to {train_file}...")
+    train_df.to_csv(train_file, sep='\t', index=False)
+    
+    # Also copy item/user files if they exist, to preserve features if needed
+    # But for now we assume interactions are enough for the basic split
+    
+    return temp_dir, temp_dataset_name, test_df, user_col, item_col, ts_col
+
+
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='Run RecBLR with unseen item handling.')
     parser.add_argument('--model', type=str, default='R', choices=['B', 'R', 'S'],
@@ -182,12 +257,22 @@ if __name__ == '__main__':
     logger.info(sys.argv)
     logger.info(config)
 
-    # dataset filtering
+    # dataset filtering & splitting (H&M style)
+    # We do this BEFORE creating the dataset for RecBole
+    temp_data_path, temp_dataset_name, test_df, user_col_name, item_col_name, ts_col_name = prepare_hm_data(config)
+    
+    # Update config to use the temp train file
+    config['data_path'] = temp_data_path
+    config['dataset'] = temp_dataset_name
+    
+    # dataset filtering (RecBole standard loading of the TRAIN split)
     dataset = create_dataset(config)
     logger.info(dataset)
 
-    # dataset splitting
-    train_data, valid_data, test_data = data_preparation(config, dataset)
+    # dataset splitting (Internal split for training/validation)
+    # We use the train split from H&M as the "full" dataset here, 
+    # and let RecBole split it further for training/validation monitoring
+    train_data, valid_data, test_data_dummy = data_preparation(config, dataset)
 
     # model loading and initialization
     init_seed(config["seed"] + config["local_rank"], config["reproducibility"])
@@ -237,6 +322,29 @@ if __name__ == '__main__':
                 n_components=args.n_components,
                 random_state=config['seed']
             )
+            # Add method to map list of tokens
+            def map_list_to_valid(self, item_list):
+                # Exclude last item if we are following H&M logic? 
+                # No, map everything, we slice later.
+                valid_list = []
+                # H&M logic: iterate range(len(item_list)-1) -> they DROP the last item from the input list
+                # But we want to map the WHOLE list so we can extract target later.
+                # Wait, H&M `to_valid_list` returns a list of length N-1.
+                # So `test_sequence['item_id_list']` has length N-1.
+                # And `test_sequence['sequence']` has length N.
+                # So we should probably implement `map_list_to_valid` to return the full mapped list,
+                # and then slice it in the eval loop.
+                
+                for item in item_list:
+                    if item in self.valid_items_set:
+                        valid_list.append(item)
+                    else:
+                        valid_list.append(self.get_most_similar_item(item))
+                return valid_list
+            
+            # Monkey patch the handler or just use the logic here
+            unseen_handler.map_list_to_valid = map_list_to_valid.__get__(unseen_handler)
+            
             unseen_handler.fit(verbose=True)
 
             # Save handler for reuse
@@ -266,9 +374,157 @@ if __name__ == '__main__':
     logger.info("Evaluation phase")
     logger.info("="*80)
 
-    test_result = trainer.evaluate(
-        test_data, show_progress=config["show_progress"]
-    )
+    # model evaluation
+    logger.info("\n" + "="*80)
+    logger.info("Evaluation phase (Custom H&M Style)")
+    logger.info("="*80)
+
+    # Prepare test sequences from test_df
+    print("Preparing test sequences...")
+    test_sequence = test_df.sort_values([user_col_name, ts_col_name]) \
+                        .groupby(user_col_name)[item_col_name] \
+                        .agg(list) \
+                        .reset_index()
+    test_sequence.columns = ["customer_id", "sequence"]
+    
+    # Map unseen items if handler is available
+    if 'unseen_handler' in locals() and unseen_handler is not None:
+        print("Mapping unseen items in test sequences...")
+        # We use the handler's internal mapping logic
+        # Note: unseen_handler.map_to_valid expects a list of tokens
+        # We need to apply it to each sequence
+        
+        # Define a helper to map a single sequence
+        def map_seq(seq):
+            return unseen_handler.map_list_to_valid(seq)
+            
+        test_sequence["item_id_list_tokens"] = test_sequence["sequence"].apply(map_seq)
+    else:
+        print("No unseen handler - using raw sequences (unseen items might be dropped/padded)")
+        test_sequence["item_id_list_tokens"] = test_sequence["sequence"]
+
+    # Convert tokens to IDs
+    print("Converting tokens to IDs...")
+    def tokens_to_ids(tokens):
+        # RecBole's token2id returns 0 for unknown tokens
+        # We assume tokens are already mapped to valid ones if handler was used
+        return [dataset.token2id(dataset.iid_field, t) for t in tokens]
+
+    test_sequence["item_id_list"] = test_sequence["item_id_list_tokens"].apply(tokens_to_ids)
+    test_sequence["item_length"] = test_sequence["item_id_list"].apply(len)
+    
+    # Evaluation Loop
+    print(f"Evaluating on {len(test_sequence)} users...")
+    model.eval()
+    
+    # Metrics
+    from recbole.evaluator.metrics import Hit, NDCG, MRR
+    # We can use RecBole metrics or sklearn. Let's use sklearn to match H&M exactly if possible,
+    # or just implement simple Hit/NDCG calculation.
+    # H&M notebook uses ndcg_score from sklearn.
+    from sklearn.metrics import ndcg_score
+    
+    ndcg_10_scores = []
+    hit_10_scores = []
+    
+    device = config['device']
+    
+    with torch.no_grad():
+        for i, row in test_sequence.iterrows():
+            if i % 1000 == 0:
+                print(f"Processed {i}/{len(test_sequence)} users")
+                
+            seq_ids = row["item_id_list"]
+            if len(seq_ids) == 0:
+                continue
+                
+            # Input: sequence excluding the last item (leave-one-out for prediction)
+            # OR H&M style: use full sequence to predict NEXT?
+            # H&M notebook: 
+            # true_item = row["sequence"][-1]
+            # item_id_list = ... (it seems they use the full sequence?)
+            # Let's check H&M notebook again.
+            # "item_id_list" in H&M notebook comes from "sequence".
+            # "sequence" is the list of ALL interactions for that user in the test set.
+            # Wait, test_df contains interactions.
+            # If a user has 5 interactions in test_df, do we predict the 6th?
+            # Or do we use 4 to predict 5th?
+            # H&M notebook:
+            # true_item = row["sequence"][-1]
+            # item_id_list = ... row["item_id_list"] ...
+            # It seems they use the WHOLE list as input?
+            # No, RecBole models usually take history.
+            # If they pass the whole list, the model might predict the *next* after the last.
+            # BUT `true_item` is the LAST item of the sequence.
+            # So they must be using `sequence[:-1]` as input?
+            # Let's look at H&M notebook cell 44 again carefully.
+            # item_id_list = np.array([dataset.token2id(dataset.iid_field, row["item_id_list"])])
+            # It uses the FULL list from the dataframe.
+            # AND `true_item = row["sequence"][-1]`.
+            # This implies the "sequence" column includes the target.
+            # If they pass the full list to the model, RecBole's `forward` typically processes the whole sequence.
+            # `full_sort_predict` typically uses the *last* state of the sequence to predict the *next* item.
+            # If the sequence includes the target, then we are predicting the item *after* the target.
+            # UNLESS `row["item_id_list"]` was constructed to EXCLUDE the last item?
+            # In cell 37: `to_valid_list(item_list)` iterates `range(len(item_list)-1)`.
+            # AHA! `range(len(item_list)-1)` excludes the last item!
+            # So `item_id_list` in H&M notebook IS `sequence[:-1]`.
+            
+            # So we must do the same: Input is sequence[:-1], Target is sequence[-1].
+            
+            input_seq = seq_ids[:-1]
+            target_item = seq_ids[-1] # This is the ID of the target (mapped or raw?)
+            # H&M notebook uses `true_item = row["sequence"][-1]` (RAW token) for ground truth.
+            # And maps it to ID for metric calculation.
+            
+            if len(input_seq) == 0:
+                continue
+                
+            interaction = {
+                "item_id_list": torch.LongTensor([input_seq]).to(device),
+                "item_length": torch.LongTensor([len(input_seq)]).to(device)
+            }
+            
+            scores = model.full_sort_predict(interaction)[0] # [n_items]
+            scores = scores.cpu().detach().numpy()
+            
+            # Mask the padding item (0)
+            scores[0] = -np.inf
+            
+            # Get top K
+            k = 10
+            topk_indices = np.argpartition(scores, -k)[-k:]
+            topk_indices = topk_indices[np.argsort(scores[topk_indices])[::-1]]
+            
+            # Calculate Ground Truth ID
+            # We need the ID of the true item.
+            # If the true item was unseen, it might be mapped to a valid ID in our `seq_ids`?
+            # No, `seq_ids` comes from `item_id_list_tokens` which was mapped.
+            # So `target_item` is the ID of the mapped true item.
+            # H&M notebook: `true_item = convert2valid(true_item) if ... else true_item`
+            # So yes, we evaluate against the MAPPED target if it was unseen.
+            
+            target_id = target_item
+            
+            # Hit@10
+            hit = 1 if target_id in topk_indices else 0
+            hit_10_scores.append(hit)
+            
+            # NDCG@10
+            if hit:
+                rank = np.where(topk_indices == target_id)[0][0]
+                ndcg = 1.0 / np.log2(rank + 2)
+            else:
+                ndcg = 0
+            ndcg_10_scores.append(ndcg)
+
+    avg_hit = np.mean(hit_10_scores)
+    avg_ndcg = np.mean(ndcg_10_scores)
+    
+    test_result = {
+        'hit@10': avg_hit,
+        'ndcg@10': avg_ndcg
+    }
 
     environment_tb = get_environment(config)
     logger.info(
