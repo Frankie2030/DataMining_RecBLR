@@ -69,10 +69,14 @@ def create_item_features_for_dataset(dataset_name, dataset_path='dataset'):
     # Try to load item file
     item_file = os.path.join(dataset_path, dataset_name, f'{dataset_name}.item')
     if os.path.exists(item_file):
+        print(f"Found item file: {item_file}")
         try:
             item_df = pd.read_csv(item_file, sep='\t')
+            print(f"Loaded {len(item_df)} items from .item file")
+            
             # Check column names (RecBole uses :token suffix)
             cols = item_df.columns.tolist()
+            print(f"Columns found: {cols}")
 
             # Find item_id column
             item_id_col = None
@@ -84,22 +88,40 @@ def create_item_features_for_dataset(dataset_name, dataset_path='dataset'):
             if item_id_col is None:
                 print(f"Could not find item_id column in {item_file}")
             else:
+                print(f"Using item_id column: {item_id_col}")
+                
                 # Use available text columns as description
-                text_cols = item_df.select_dtypes(include=['object']).columns.tolist()
-                if item_id_col in text_cols:
-                    text_cols.remove(item_id_col)
+                # Select columns that are text-based (object dtype or token_seq)
+                text_cols = []
+                for col in cols:
+                    if col != item_id_col:
+                        # Include object columns and token_seq columns
+                        if ':token' in col or ':token_seq' in col or item_df[col].dtype == 'object':
+                            # Skip numeric-looking columns
+                            if ':float' not in col and ':int' not in col:
+                                text_cols.append(col)
+                
+                print(f"Text columns for description: {text_cols}")
 
                 if text_cols:
                     print(f"Using item features from {len(text_cols)} columns: {text_cols}")
+                    # Create description by concatenating text columns
                     item_df['description'] = item_df[text_cols].apply(
-                        lambda x: ' '.join(x.dropna().astype(str)),
+                        lambda x: ' '.join(str(val) for val in x.dropna() if str(val).strip()),
                         axis=1
                     )
                     result = item_df[[item_id_col, 'description']].copy()
                     result.columns = ['item_id', 'description']
+                    print(f"Successfully created features for {len(result)} items")
+                    print(f"Sample description: {result['description'].iloc[0][:100]}...")
                     return result
+                else:
+                    print("No suitable text columns found for creating descriptions")
         except Exception as e:
-            print(f"Could not load item features from {item_file}: {e}")
+            import traceback
+            print(f"ERROR loading item features from {item_file}:")
+            print(f"Exception: {e}")
+            print(f"Traceback:\n{traceback.format_exc()}")
 
     # Try to create features from interactions
     inter_file = os.path.join(dataset_path, dataset_name, f'{dataset_name}.inter')
@@ -202,8 +224,8 @@ if __name__ == '__main__':
     parser.add_argument('--model', type=str, default='R', choices=['B', 'R', 'S'],
                         help='Model to use: B for Bert4Rec, R for RecBLR (default: R), S for SASRec')
     parser.add_argument('--mode', type=str, default='both',
-                        choices=['preprocessing', 'postprocessing', 'both'],
-                        help='Unseen handling mode: preprocessing, postprocessing, or both')
+                        choices=['none', 'preprocessing', 'postprocessing', 'both'],
+                        help='Unseen handling mode: none (no handling), preprocessing, postprocessing, or both')
     parser.add_argument('--n_components', type=int, default=16,
                         help='Number of PCA components for item similarity (default: 16)')
     parser.add_argument('--skip_item_features', action='store_true',
@@ -285,7 +307,7 @@ if __name__ == '__main__':
     # ========================================================================
     # Evaluation with unseen item handling
     # ========================================================================
-    if args.model == 'R' and not args.skip_item_features:
+    if args.model == 'R' and args.mode != 'none' and not args.skip_item_features:
         logger.info("\n" + "="*80)
         logger.info(f"Setting up unseen item handling ({args.mode})")
         logger.info("="*80)
@@ -353,6 +375,13 @@ if __name__ == '__main__':
         else:
             logger.warning("No item features available - skipping unseen handling")
             logger.warning("Evaluation will use standard RecBLR (no preprocessing/postprocessing)")
+    elif args.mode == 'none':
+        logger.info("\n" + "="*80)
+        logger.info("Unseen handling mode: NONE")
+        logger.info("Using H&M-style 80/20 split WITHOUT unseen item handling")
+        logger.info("Unseen items in test data will be filtered out")
+        logger.info("="*80)
+
 
     # model evaluation
     logger.info("\n" + "="*80)
@@ -390,13 +419,39 @@ if __name__ == '__main__':
 
     # Convert tokens to IDs
     print("Converting tokens to IDs...")
+    
+    # Track unseen items
+    unseen_count = 0
+    total_count = 0
+    
     def tokens_to_ids(tokens):
-        # RecBole's token2id returns 0 for unknown tokens
-        # We assume tokens are already mapped to valid ones if handler was used
-        return [dataset.token2id(dataset.iid_field, t) for t in tokens]
+        nonlocal unseen_count, total_count
+        ids = []
+        for t in tokens:
+            total_count += 1
+            try:
+                # Try to convert token to ID
+                item_id = dataset.token2id(dataset.iid_field, t)
+                ids.append(item_id)
+            except ValueError:
+                # Token doesn't exist in vocabulary - skip it
+                unseen_count += 1
+                # Don't add to ids - this will shorten the sequence
+                # Alternatively, we could add 0 (padding) but that might affect model behavior
+                pass
+        return ids
 
     test_sequence["item_id_list"] = test_sequence["item_id_list_tokens"].apply(tokens_to_ids)
     test_sequence["item_length"] = test_sequence["item_id_list"].apply(len)
+    
+    # Report unseen items
+    if unseen_count > 0:
+        print(f"WARNING: Found {unseen_count}/{total_count} ({100*unseen_count/total_count:.2f}%) unseen items in test data")
+        print(f"These items were filtered out from sequences (may affect evaluation accuracy)")
+        print(f"Consider using --mode preprocessing/postprocessing/both to handle unseen items")
+    else:
+        print(f"All {total_count} items in test data are known (no unseen items)")
+    
     
     # Evaluation Loop
     print(f"Evaluating on {len(test_sequence)} users...")
