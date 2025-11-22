@@ -163,11 +163,13 @@ def create_item_features_for_dataset(dataset_name, dataset_path='dataset'):
 
 def prepare_hm_data(config):
     """
-    1. Split users 80/20 (Train/Test)
-    2. Save train split for RecBole training
+    1. Split users into train/val/test (70/10/20)
+    2. Save train+val for RecBole training (we'll use val for monitoring)
     3. Return test split dataframe for manual evaluation
+    
+    This avoids RecBole's leave-one-out split which never has unseen users/items.
     """
-    print("Preparing data with H&M-style splitting...")
+    print("Preparing data with 3-way user split (train/val/test = 70/10/20)...")
     
     # Construct file path
     dataset_name = config['dataset']
@@ -189,34 +191,32 @@ def prepare_hm_data(config):
     if not all([ts_col, user_col, item_col]):
         raise ValueError(f"Could not identify all required columns (user, item, timestamp). Found: {df.columns}")
         
-    # # 1. Filter by timestamp (last 1/64th)
-    # print("Filtering by timestamp (last 1/64th)...")
-    # # Ensure timestamp is numeric
-    # # df[ts_col] = pd.to_numeric(df[ts_col], errors='coerce') 
-    # # Assuming it's already float/int based on RecBole format, but let's be safe
+    # Split users into train/val/test (70/10/20)
+    print("Splitting users 70/10/20 (train/val/test)...")
+    all_users = df.groupby(user_col)[item_col].agg(list).reset_index()[user_col]
     
-    # quantile_val = df[ts_col].quantile(1 - 1/64)
-    # data = df[df[ts_col] > quantile_val].copy()
-    # print(f"Filtered data size: {len(data)} (Original: {len(df)})")
+    # First split: 70% train, 30% temp (val+test)
+    train_users, temp_users = train_test_split(all_users, test_size=0.3, random_state=42)
     
-    # 2. Split users
-    print("Splitting users 80/20...")
-    user_seqs = df.groupby(user_col)[item_col].agg(list).reset_index()[user_col]
-    train_ids, test_ids = train_test_split(user_seqs, test_size=0.2, random_state=42)
+    # Second split: split temp into 10% val, 20% test (which is 1/3 and 2/3 of temp)
+    val_users, test_users = train_test_split(temp_users, test_size=2/3, random_state=42)
     
-    train_df = df[df[user_col].isin(train_ids)].copy()
-    test_df = df[df[user_col].isin(test_ids)].copy()
+    train_df = df[df[user_col].isin(train_users)].copy()
+    val_df = df[df[user_col].isin(val_users)].copy()
+    test_df = df[df[user_col].isin(test_users)].copy()
     
     print(f"Train set: {len(train_df)} interactions, {train_df[user_col].nunique()} users")
-    print(f"Test set: {len(test_df)} interactions, {test_df[user_col].nunique()} users")
+    print(f"Val set:   {len(val_df)} interactions, {val_df[user_col].nunique()} users")
+    print(f"Test set:  {len(test_df)} interactions, {test_df[user_col].nunique()} users")
     
-    # 3. Save train split to original dataset directory
-    # Overwrite the original .inter file with train split
+    # Save train+val for RecBole (it will use leave-one-out on this for internal validation)
+    # But we'll do our own evaluation on the held-out test users
+    train_val_df = pd.concat([train_df, val_df], ignore_index=True)
     train_file = inter_file
-    print(f"Saving train split to {train_file}...")
-    train_df.to_csv(train_file, sep='\t', index=False)
+    print(f"Saving train+val split to {train_file}...")
+    train_val_df.to_csv(train_file, sep='\t', index=False)
     
-    return test_df, user_col, item_col, ts_col
+    return test_df, val_df, user_col, item_col, ts_col
 
 
 if __name__ == '__main__':
@@ -270,7 +270,7 @@ if __name__ == '__main__':
     # dataset filtering & splitting (H&M style)
     # We do this BEFORE creating the dataset for RecBole
     # This will overwrite the original .inter file with train split
-    test_df, user_col_name, item_col_name, ts_col_name = prepare_hm_data(config)
+    test_df, val_df, user_col_name, item_col_name, ts_col_name = prepare_hm_data(config)
     
     # dataset filtering (RecBole standard loading of the TRAIN split)
     dataset = create_dataset(config)
