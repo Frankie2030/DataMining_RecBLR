@@ -420,24 +420,20 @@ if __name__ == '__main__':
     # Convert tokens to IDs
     print("Converting tokens to IDs...")
     
-    # Track unseen items
-    unseen_count = 0
-    total_count = 0
+    # Track unseen items using a mutable list (avoids nonlocal)
+    stats = {'unseen': 0, 'total': 0}
     
     def tokens_to_ids(tokens):
-        nonlocal unseen_count, total_count
         ids = []
         for t in tokens:
-            total_count += 1
+            stats['total'] += 1
             try:
                 # Try to convert token to ID
                 item_id = dataset.token2id(dataset.iid_field, t)
                 ids.append(item_id)
             except ValueError:
                 # Token doesn't exist in vocabulary - skip it
-                unseen_count += 1
-                # Don't add to ids - this will shorten the sequence
-                # Alternatively, we could add 0 (padding) but that might affect model behavior
+                stats['unseen'] += 1
                 pass
         return ids
 
@@ -445,12 +441,13 @@ if __name__ == '__main__':
     test_sequence["item_length"] = test_sequence["item_id_list"].apply(len)
     
     # Report unseen items
-    if unseen_count > 0:
-        print(f"WARNING: Found {unseen_count}/{total_count} ({100*unseen_count/total_count:.2f}%) unseen items in test data")
+    if stats['unseen'] > 0:
+        print(f"WARNING: Found {stats['unseen']}/{stats['total']} ({100*stats['unseen']/stats['total']:.2f}%) unseen items in test data")
         print(f"These items were filtered out from sequences (may affect evaluation accuracy)")
         print(f"Consider using --mode preprocessing/postprocessing/both to handle unseen items")
     else:
-        print(f"All {total_count} items in test data are known (no unseen items)")
+        print(f"All {stats['total']} items in test data are known (no unseen items)")
+    
     
     
     # Evaluation Loop
