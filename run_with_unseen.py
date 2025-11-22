@@ -61,13 +61,13 @@ def create_item_features_for_dataset(dataset_name, dataset_path='dataset'):
     print(f"Loading item features for {dataset_name}...")
 
     # Check for pre-created features file
-    features_file = os.path.join(dataset_path, dataset_name, f'{dataset_name}_item_features.csv')
+    features_file = os.path.join(dataset_path, f'{dataset_name}_item_features.csv')
     if os.path.exists(features_file):
         print(f"Found pre-created features: {features_file}")
         return pd.read_csv(features_file)
 
     # Try to load item file
-    item_file = os.path.join(dataset_path, dataset_name, f'{dataset_name}.item')
+    item_file = os.path.join(dataset_path, f'{dataset_name}.item')
     if os.path.exists(item_file):
         print(f"Found item file: {item_file}")
         try:
@@ -124,7 +124,7 @@ def create_item_features_for_dataset(dataset_name, dataset_path='dataset'):
             print(f"Traceback:\n{traceback.format_exc()}")
 
     # Try to create features from interactions
-    inter_file = os.path.join(dataset_path, dataset_name, f'{dataset_name}.inter')
+    inter_file = os.path.join(dataset_path, f'{dataset_name}.inter')
     if os.path.exists(inter_file):
         print(f"Creating synthetic features from interaction data: {inter_file}")
         try:
