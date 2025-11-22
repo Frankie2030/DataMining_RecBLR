@@ -7,8 +7,8 @@ This script extends the standard run.py to support evaluation with:
 - Both: Full preprocessing + postprocessing pipeline
 
 Usage:
-    python run_with_unseen.py --model R --mode preprocessing
-    python run_with_unseen.py --model R --mode postprocessing
+    python run_with_unseen.py --model R --mode pre
+    python run_with_unseen.py --model R --mode post
     python run_with_unseen.py --model R --mode both
 """
 
@@ -41,7 +41,6 @@ from recbole.utils import (
     get_environment,
 )
 from plot_utils import parse_log_text, generate_plots
-from unseen_item_handler import UnseenItemHandler
 
 
 def create_item_features_for_dataset(dataset_name, dataset_path='dataset'):
@@ -240,8 +239,8 @@ if __name__ == '__main__':
     parser.add_argument('--model', type=str, default='R', choices=['B', 'R', 'S'],
                         help='Model to use: B for Bert4Rec, R for RecBLR (default: R), S for SASRec')
     parser.add_argument('--mode', type=str, default='both',
-                        choices=['none', 'preprocessing', 'postprocessing', 'both'],
-                        help='Unseen handling mode: none (no handling), preprocessing, postprocessing, or both')
+                        choices=['none', 'pre', 'post', 'both'],
+                        help='Unseen handling mode: none (no handling), pre, post, or both')
     parser.add_argument('--n_components', type=int, default=16,
                         help='Number of PCA components for item similarity (default: 16)')
     parser.add_argument('--skip_item_features', action='store_true',
@@ -321,8 +320,13 @@ if __name__ == '__main__':
     )
 
     # ========================================================================
-    # Evaluation with unseen item handling
+    # Setup item similarity for unseen item handling (H&M style)
     # ========================================================================
+    item_mapper = None
+    valid_mapper = None
+    sim_cosine_valid = None
+    convert2valid = None
+    
     if args.model == 'R' and args.mode != 'none' and not args.skip_item_features:
         logger.info("\n" + "="*80)
         logger.info(f"Setting up unseen item handling ({args.mode})")
@@ -330,76 +334,71 @@ if __name__ == '__main__':
 
         # Get valid items from training vocabulary
         valid_items = dataset.id2token(dataset.iid_field, range(1, dataset.item_num))
+        valid_items_set = set(valid_items)
 
         # Create or load item features
         dataset_name = config['dataset']
         item_features = create_item_features_for_dataset(dataset_name, config['data_path'])
 
         if item_features is not None and len(item_features) > 0:
-            # Filter item features to only include valid items (items in training vocabulary)
-            # This prevents OOM when computing similarity matrix for all items
             logger.info(f"Total items in features: {len(item_features)}")
             logger.info(f"Valid items in training: {len(valid_items)}")
             
-            # Filter to only valid items
-            item_features_filtered = item_features[item_features['item_id'].isin(valid_items)].copy()
-            logger.info(f"Filtered item features: {len(item_features_filtered)} items")
+            # Sort and create mappers (H&M style)
+            item_features = item_features.sort_values("item_id").reset_index(drop=True)
+            item_mapper = {item_features["item_id"].iloc[i]: i for i in range(len(item_features))}
+            item_inv_mapper = {i: item_features["item_id"].iloc[i] for i in range(len(item_features))}
             
-            if len(item_features_filtered) == 0:
-                logger.warning("No valid items found in item features! Skipping unseen handling.")
-            else:
-                # Create and fit unseen item handler
-                logger.info(f"Creating UnseenItemHandler with n_components={args.n_components}")
-
-            unseen_handler = UnseenItemHandler(
-                item_descriptions=item_features_filtered,
-                valid_items=list(valid_items),
-                n_components=args.n_components,
-                random_state=config['seed']
-            )
-            # Add method to map list of tokens
-            def map_list_to_valid(self, item_list):
-                # Exclude last item if we are following H&M logic? 
-                # No, map everything, we slice later.
-                valid_list = []
-                # H&M logic: iterate range(len(item_list)-1) -> they DROP the last item from the input list
-                # But we want to map the WHOLE list so we can extract target later.
-                # Wait, H&M `to_valid_list` returns a list of length N-1.
-                # So `test_sequence['item_id_list']` has length N-1.
-                # And `test_sequence['sequence']` has length N.
-                # So we should probably implement `map_list_to_valid` to return the full mapped list,
-                # and then slice it in the eval loop.
+            # Create valid item mappers
+            valid_ids = [item_mapper[item] for item in valid_items if item in item_mapper]
+            valid_mapper = {valid_items[i]: i for i in range(len(valid_items)) if valid_items[i] in item_mapper}
+            valid_inv_mapper = {i: valid_items[i] for i in range(len(valid_items)) if valid_items[i] in item_mapper}
+            
+            logger.info(f"Computing TF-IDF vectors for {len(item_features)} items...")
+            from sklearn.feature_extraction.text import TfidfVectorizer
+            from sklearn.decomposition import TruncatedSVD
+            from scipy.sparse import csr_matrix
+            from sklearn.metrics.pairwise import cosine_similarity
+            from functools import lru_cache
+            
+            # Compute TF-IDF
+            vect = TfidfVectorizer()
+            tfidf = vect.fit_transform(item_features["description"])
+            X = csr_matrix(tfidf)
+            
+            # Reduce dimensions
+            logger.info(f"Reducing to {args.n_components} components with TruncatedSVD...")
+            svd = TruncatedSVD(n_components=args.n_components, n_iter=3, random_state=config['seed'])
+            X = svd.fit_transform(X)
+            
+            # Get valid item vectors
+            X_valid = X[valid_ids]
+            
+            # Compute similarity matrix (all items vs valid items only)
+            logger.info(f"Computing cosine similarity matrix ({len(item_features)} x {len(valid_ids)})...")
+            sim_cosine_valid = cosine_similarity(X, X_valid)
+            
+            # Create conversion function (H&M style)
+            @lru_cache(maxsize=2048)
+            def convert2valid(item):
+                """Map an unseen item to the most similar valid item"""
+                if item in valid_items_set:
+                    return item
+                if item not in item_mapper:
+                    # Item not in features at all - return a random valid item
+                    return list(valid_items)[0]
+                item_id = item_mapper[item]
+                sim_scores = sim_cosine_valid[item_id]
+                best_idx = np.argmax(sim_scores)
+                return valid_inv_mapper[best_idx]
+            
+            logger.info(f"Unseen item handling setup complete!")
+            logger.info(f"Mode: {args.mode}")
+            if args.mode in ['pre', 'both']:
+                logger.info("  - Preprocessing: Will map unseen items to similar valid items")
+            if args.mode in ['post', 'both']:
+                logger.info("  - Postprocessing: Not implemented yet (would extend predictions)")
                 
-                for item in item_list:
-                    if item in self.valid_items_set:
-                        valid_list.append(item)
-                    else:
-                        valid_list.append(self.get_most_similar_item(item))
-                return valid_list
-            
-            # Monkey patch the handler or just use the logic here
-            unseen_handler.map_list_to_valid = map_list_to_valid.__get__(unseen_handler)
-            
-            unseen_handler.fit(verbose=True)
-
-            # Save handler for reuse
-            handler_path = f'saved/unseen_handler_{dataset_name}.pkl'
-            os.makedirs('saved', exist_ok=True)
-            unseen_handler.save(handler_path)
-            logger.info(f"Saved UnseenItemHandler to {handler_path}")
-
-            # Enable unseen handling based on mode
-            use_preprocessing = args.mode in ['preprocessing', 'both']
-            use_postprocessing = args.mode in ['postprocessing', 'both']
-
-            model.enable_unseen_handling(
-                unseen_handler,
-                use_preprocessing=use_preprocessing,
-                use_postprocessing=use_postprocessing,
-                verbose=True
-            )
-
-            logger.info(f"\nEvaluating with unseen handling mode: {args.mode}")
         else:
             logger.warning("No item features available - skipping unseen handling")
             logger.warning("Evaluation will use standard RecBLR (no preprocessing/postprocessing)")
@@ -429,22 +428,28 @@ if __name__ == '__main__':
                         .reset_index()
     test_sequence.columns = ["customer_id", "sequence"]
     
-    # Map unseen items if handler is available
-    if 'unseen_handler' in locals() and unseen_handler is not None:
-        print("Mapping unseen items in test sequences...")
-        # We use the handler's internal mapping logic
-        # Note: unseen_handler.map_to_valid expects a list of tokens
-        # We need to apply it to each sequence
+    # Map unseen items if convert2valid function is available (preprocessing mode)
+    if convert2valid is not None and args.mode in ['pre', 'both']:
+        print("Mapping unseen items in test sequences (preprocessing)...")
         
-        # Define a helper to map a single sequence
-        def map_seq(seq):
-            return unseen_handler.map_list_to_valid(seq)
-            
-        test_sequence["item_id_list_tokens"] = test_sequence["sequence"].apply(map_seq)
+        # H&M-style: map sequence[:-1] to valid items, keep last item as target
+        def to_valid_list(item_list):
+            """Map unseen items to similar valid items (H&M style)"""
+            valid_list = []
+            # Map all items except the last one (which is the target)
+            for i in range(len(item_list) - 1):
+                item = item_list[i]
+                valid_list.append(convert2valid(item))
+            return ['[PAD]'] if len(valid_list) == 0 else valid_list
+        
+        test_sequence["item_id_list_tokens"] = test_sequence["sequence"].apply(to_valid_list)
     else:
-        print("No unseen handler - using raw sequences (unseen items might be dropped/padded)")
-        test_sequence["item_id_list_tokens"] = test_sequence["sequence"]
-
+        print("No preprocessing - using raw sequences (unseen items might be dropped/padded)")
+        # H&M style: use all items except last as input
+        test_sequence["item_id_list_tokens"] = test_sequence["sequence"].apply(
+            lambda seq: seq[:-1] if len(seq) > 1 else ['[PAD]']
+        )
+    
     # Convert tokens to IDs
     print("Converting tokens to IDs...")
     
