@@ -336,11 +336,23 @@ if __name__ == '__main__':
         item_features = create_item_features_for_dataset(dataset_name, config['data_path'])
 
         if item_features is not None and len(item_features) > 0:
-            # Create and fit unseen item handler
-            logger.info(f"Creating UnseenItemHandler with n_components={args.n_components}")
+            # Filter item features to only include valid items (items in training vocabulary)
+            # This prevents OOM when computing similarity matrix for all items
+            logger.info(f"Total items in features: {len(item_features)}")
+            logger.info(f"Valid items in training: {len(valid_items)}")
+            
+            # Filter to only valid items
+            item_features_filtered = item_features[item_features['item_id'].isin(valid_items)].copy()
+            logger.info(f"Filtered item features: {len(item_features_filtered)} items")
+            
+            if len(item_features_filtered) == 0:
+                logger.warning("No valid items found in item features! Skipping unseen handling.")
+            else:
+                # Create and fit unseen item handler
+                logger.info(f"Creating UnseenItemHandler with n_components={args.n_components}")
 
             unseen_handler = UnseenItemHandler(
-                item_descriptions=item_features,
+                item_descriptions=item_features_filtered,
                 valid_items=list(valid_items),
                 n_components=args.n_components,
                 random_state=config['seed']
