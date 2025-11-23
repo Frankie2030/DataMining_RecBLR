@@ -28,8 +28,6 @@ from scipy.sparse import csr_matrix
 from recbole.utils import init_logger, init_seed, set_color, get_flops, get_environment
 from recbole.trainer import Trainer
 from RecBLR import RecBLR
-from recbole.model.sequential_recommender.bert4rec import BERT4Rec
-from recbole.model.sequential_recommender.sasrec import SASRec
 from recbole.config import Config
 from recbole.data import create_dataset, data_preparation
 from recbole.data.transform import construct_transform
@@ -38,22 +36,46 @@ from plot_utils import parse_log_text, generate_plots
 
 def prepare_data_split(config):
     """
-    Split data into train/test by users (80/20 split).
-    Returns test_df for manual evaluation.
+    1. Filter to last 1/8 of data by timestamp
+    2. Split data into train/test by users (80/20 split)
+    3. Returns test_df for manual evaluation
+    Does NOT overwrite original files.
     """
-    print("Preparing 80/20 user split...")
+    print("Preparing data split...")
     
     dataset_name = config['dataset']
     data_path = config['data_path']
     inter_file = os.path.join(data_path, f'{dataset_name}.inter')
+    train_file = os.path.join(data_path, f'{dataset_name}_train.inter')
+    test_file = os.path.join(data_path, f'{dataset_name}_test.inter')
     
-    # Read data
+    # Check if split already exists
+    if os.path.exists(train_file) and os.path.exists(test_file):
+        print(f"Using existing split: {train_file} and {test_file}")
+        test_df = pd.read_csv(test_file, sep='\t')
+        
+        # Get column names
+        user_col = next((c for c in test_df.columns if 'user' in c.lower()), None)
+        item_col = next((c for c in test_df.columns if 'item' in c.lower()), None)
+        ts_col = next((c for c in test_df.columns if 'timestamp' in c.lower()), None)
+        
+        return test_df, user_col, item_col, ts_col
+    
+    # Read original data
+    print(f"Reading original data from {inter_file}...")
     df = pd.read_csv(inter_file, sep='\t')
     
     # Identify columns
     user_col = next((c for c in df.columns if 'user' in c.lower()), None)
     item_col = next((c for c in df.columns if 'item' in c.lower()), None)
     ts_col = next((c for c in df.columns if 'timestamp' in c.lower()), None)
+    
+    # Filter to last 1/8 of data by timestamp (like notebook but 1/8 instead of 1/64)
+    print(f"Original data: {len(df)} interactions")
+    df = df.sort_values(by=ts_col)
+    size = len(df)
+    df = df.iloc[-size//8:]  # Take last 1/8
+    print(f"After filtering to last 1/8: {len(df)} interactions")
     
     # Split users 80/20
     all_users = df[user_col].unique()
@@ -65,8 +87,14 @@ def prepare_data_split(config):
     print(f"Train: {len(train_df)} interactions, {len(train_users)} users")
     print(f"Test: {len(test_df)} interactions, {len(test_users)} users")
     
-    # Save train data
-    train_df.to_csv(inter_file, sep='\t', index=False)
+    # Save splits to separate files (DO NOT overwrite original)
+    print(f"Saving train split to {train_file}...")
+    train_df.to_csv(train_file, sep='\t', index=False)
+    
+    print(f"Saving test split to {test_file}...")
+    test_df.to_csv(test_file, sep='\t', index=False)
+    
+    print(f"Original file {inter_file} preserved!")
     
     return test_df, user_col, item_col, ts_col
 
@@ -236,29 +264,22 @@ def evaluate_with_preprocessing(model, test_sequence, dataset, device, mode='pre
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='Run RecBLR with unseen item handling.')
-    parser.add_argument('--model', type=str, default='R', choices=['B', 'R', 'S'],
-                        help='Model: B=Bert4Rec, R=RecBLR, S=SASRec')
     parser.add_argument('--mode', type=str, default='pre', choices=['none', 'pre'],
                         help='Unseen handling: none or pre (preprocessing)')
     parser.add_argument('--n_components', type=int, default=16,
                         help='PCA components for similarity (default: 16)')
     args = parser.parse_args()
     
-    # Model selection
-    model_class = {'B': BERT4Rec, 'R': RecBLR, 'S': SASRec}[args.model]
+    # Model is always RecBLR
+    model_class = RecBLR
     
     config_file = 'config.yaml'
     config = Config(model=model_class, config_file_list=[config_file])
     
-    if args.model != 'R':
-        config['bd_lru_only'] = False
-        config['disable_conv1d'] = False
-        config['disable_ffn'] = False
-    
     init_seed(config['seed'], config['reproducibility'])
     
     # Setup logging
-    log_file_path = f"temp_run_log_{model_class.__name__}_{args.mode}.log"
+    log_file_path = f"temp_run_log_RecBLR_{args.mode}.log"
     file_handler = logging.FileHandler(log_file_path, mode='w')
     file_handler.setLevel(logging.INFO)
     formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
@@ -275,6 +296,22 @@ if __name__ == '__main__':
     # Data preparation (notebook cells 1-13)
     # ========================================================================
     test_df, user_col, item_col, ts_col = prepare_data_split(config)
+    
+    # Point RecBole to the train split
+    train_file = os.path.join(config['data_path'], f"{config['dataset']}_train.inter")
+    if os.path.exists(train_file):
+        # Temporarily rename files so RecBole loads the train split
+        original_file = os.path.join(config['data_path'], f"{config['dataset']}.inter")
+        backup_file = os.path.join(config['data_path'], f"{config['dataset']}_original.inter")
+        
+        # Backup original if not already backed up
+        if not os.path.exists(backup_file):
+            os.rename(original_file, backup_file)
+        
+        # Copy train split to main file for RecBole
+        import shutil
+        shutil.copy(train_file, original_file)
+        print(f"RecBole will use train split: {train_file}")
     
     # ========================================================================
     # Model training (notebook cells 14-15)
@@ -380,7 +417,7 @@ if __name__ == '__main__':
         log_contents = f.read()
     df = parse_log_text(log_contents)
     
-    output_prefix = f"{model_class.__name__}_{config_file.split('/')[-1].replace('.yaml', '')}_{args.mode}"
+    output_prefix = f"RecBLR_{config_file.split('/')[-1].replace('.yaml', '')}_{args.mode}"
     generate_plots(df, output_prefix)
     df.to_csv(f"{output_prefix}_training_metrics.csv", index=False)
     print(f"Metrics saved to {output_prefix}_training_metrics.csv")
