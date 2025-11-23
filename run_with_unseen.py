@@ -261,7 +261,7 @@ def evaluate_with_preprocessing(model, test_sequence, dataset, device, mode='pre
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='Run RecBLR with unseen item handling.')
-    parser.add_argument('--mode', type=str, default='pre', choices=['none', 'pre'],
+    parser.add_argument('--mode', type=str, default='none', choices=['none', 'pre'],
                         help='Unseen handling: none or pre (preprocessing)')
     parser.add_argument('--n_components', type=int, default=16,
                         help='PCA components for similarity (default: 16)')
@@ -335,6 +335,12 @@ if __name__ == '__main__':
         train_data, valid_data, show_progress=config["show_progress"]
     )
     
+    # Evaluate on the test portion of the training users (seen users)
+    seen_test_result = trainer.evaluate(
+        test_data, show_progress=config["show_progress"]
+    )
+    logger.info(set_color("Seen Users Test Result", "green") + f": {seen_test_result}")
+    
     # ========================================================================
     # Item similarity setup (notebook cells 16-23)
     # ========================================================================
@@ -407,7 +413,8 @@ if __name__ == '__main__':
     )
     
     logger.info(set_color("best valid ", "yellow") + f": {best_valid_result}")
-    logger.info(set_color("test result", "yellow") + f": {test_result}")
+    logger.info(set_color("Seen Users Test Result", "green") + f": {seen_test_result}")
+    logger.info(set_color("Unseen Users Test Result", "red") + f": {test_result}")
     
     # Process and plot results
     with open(log_file_path, 'r') as f:
