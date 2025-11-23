@@ -130,12 +130,12 @@ def load_item_features(dataset_name, data_path):
     return None
 
 
-def setup_item_similarity(item_features, valid_items, n_components=16, seed=42):
+def setup_item_similarity_tfidf(item_features, valid_items, n_components=64, seed=42):
     """
-    Setup item similarity computation (notebook cells 19-23).
+    Setup item similarity using TF-IDF (legacy approach).
     Returns mappers and similarity matrix.
     """
-    print("Setting up item similarity...")
+    print("Setting up item similarity (TF-IDF)...")
     
     # Sort and create mappers
     item_features = item_features.sort_values("item_id").reset_index(drop=True)
@@ -162,6 +162,38 @@ def setup_item_similarity(item_features, valid_items, n_components=16, seed=42):
     # Compute similarity matrix
     print(f"Computing similarity matrix ({len(item_features)} x {len(valid_ids)})...")
     sim_cosine_valid = cosine_similarity(X, X_valid)
+    
+    return item_mapper, valid_inv_mapper, sim_cosine_valid
+
+
+def setup_item_similarity_embeddings(model, dataset, valid_items):
+    """
+    Setup item similarity using learned embeddings from the model.
+    This is MUCH better than TF-IDF as it captures behavioral patterns.
+    """
+    print("Setting up item similarity (Model Embeddings)...")
+    
+    # Get all item embeddings from the trained model
+    with torch.no_grad():
+        # Get embedding layer from model
+        item_embeddings = model.item_embedding.weight.cpu().numpy()
+    
+    print(f"Extracted embeddings: {item_embeddings.shape}")
+    
+    # Create mappers for all items (including unseen)
+    all_items = dataset.id2token(dataset.iid_field, range(dataset.item_num))
+    item_mapper = {item: idx for idx, item in enumerate(all_items)}
+    
+    # Create valid item mappers
+    valid_ids = [item_mapper[item] for item in valid_items if item in item_mapper]
+    valid_inv_mapper = {i: valid_items[i] for i in range(len(valid_items)) if valid_items[i] in item_mapper}
+    
+    # Get embeddings for valid items only
+    X_valid = item_embeddings[valid_ids]
+    
+    # Compute similarity matrix (all items to valid items)
+    print(f"Computing embedding similarity ({dataset.item_num} x {len(valid_ids)})...")
+    sim_cosine_valid = cosine_similarity(item_embeddings, X_valid)
     
     return item_mapper, valid_inv_mapper, sim_cosine_valid
 
@@ -263,8 +295,12 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='Run RecBLR with unseen item handling.')
     parser.add_argument('--mode', type=str, default='pre', choices=['none', 'pre'],
                         help='Unseen handling: none or pre (preprocessing)')
-    parser.add_argument('--n_components', type=int, default=16,
-                        help='PCA components for similarity (default: 16)')
+    parser.add_argument('--use_embeddings', action='store_true',
+                        help='Use model embeddings instead of TF-IDF (much better!)')
+    parser.add_argument('--n_components', type=int, default=64,
+                        help='PCA components for TF-IDF similarity (default: 64)')
+    parser.add_argument('--min_known_ratio', type=float, default=0.0,
+                        help='Filter: minimum ratio of known items in sequence (0.0-1.0)')
     args = parser.parse_args()
     
     # Model is always RecBLR
@@ -348,16 +384,27 @@ if __name__ == '__main__':
         logger.info("="*80)
         
         valid_items = dataset.id2token(dataset.iid_field, range(1, dataset.item_num))
-        item_features = load_item_features(config['dataset'], config['data_path'])
         
-        if item_features is not None:
-            item_mapper, valid_inv_mapper, sim_cosine_valid = setup_item_similarity(
-                item_features, valid_items, args.n_components, config['seed']
+        if args.use_embeddings:
+            # Use learned embeddings (BETTER approach)
+            logger.info("Using MODEL EMBEDDINGS for similarity")
+            item_mapper, valid_inv_mapper, sim_cosine_valid = setup_item_similarity_embeddings(
+                model, dataset, valid_items
             )
             logger.info("Item similarity setup complete!")
         else:
-            logger.warning("No item features - falling back to mode='none'")
-            args.mode = 'none'
+            # Use TF-IDF features (legacy approach)
+            logger.info("Using TF-IDF for similarity")
+            item_features = load_item_features(config['dataset'], config['data_path'])
+            
+            if item_features is not None:
+                item_mapper, valid_inv_mapper, sim_cosine_valid = setup_item_similarity_tfidf(
+                    item_features, valid_items, args.n_components, config['seed']
+                )
+                logger.info("Item similarity setup complete!")
+            else:
+                logger.warning("No item features - falling back to mode='none'")
+                args.mode = 'none'
     
     # ========================================================================
     # Evaluation (notebook cells 24-28)
@@ -376,6 +423,23 @@ if __name__ == '__main__':
     
     # Get valid articles
     valid_articles = dataset.id2token(dataset.iid_field, range(1, dataset.item_num))
+    valid_articles_set = set(valid_articles)
+    
+    # Filter sequences based on known item ratio
+    if args.min_known_ratio > 0.0:
+        print(f"Filtering sequences with at least {args.min_known_ratio:.1%} known items...")
+        def get_known_ratio(seq):
+            if len(seq) <= 1:
+                return 0.0
+            known_count = sum(1 for item in seq[:-1] if item in valid_articles_set)
+            return known_count / (len(seq) - 1)
+        
+        test_sequence['known_ratio'] = test_sequence['sequence'].apply(get_known_ratio)
+        before_filter = len(test_sequence)
+        test_sequence = test_sequence[test_sequence['known_ratio'] >= args.min_known_ratio]
+        after_filter = len(test_sequence)
+        print(f"Filtered: {before_filter} -> {after_filter} sequences ({after_filter/before_filter:.1%} kept)")
+        test_sequence = test_sequence.drop('known_ratio', axis=1)
     
     # Apply preprocessing if enabled
     if args.mode == 'pre' and item_mapper is not None:
@@ -414,7 +478,17 @@ if __name__ == '__main__':
         log_contents = f.read()
     df = parse_log_text(log_contents)
     
-    output_prefix = f"RecBLR_{config_file.split('/')[-1].replace('.yaml', '')}_{args.mode}"
+    # Create mode suffix
+    mode_suffix = args.mode
+    if args.mode == 'pre':
+        if args.use_embeddings:
+            mode_suffix += '_emb'
+        else:
+            mode_suffix += f'_tfidf{args.n_components}'
+        if args.min_known_ratio > 0:
+            mode_suffix += f'_filt{int(args.min_known_ratio*100)}'
+    
+    output_prefix = f"RecBLR_{config_file.split('/')[-1].replace('.yaml', '')}_{mode_suffix}"
     generate_plots(df, output_prefix)
     df.to_csv(f"{output_prefix}_training_metrics.csv", index=False)
     print(f"Metrics saved to {output_prefix}_training_metrics.csv")
