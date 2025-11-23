@@ -331,14 +331,15 @@ if __name__ == '__main__':
     test_df, user_col, item_col, ts_col = prepare_data_split(config)
     
     # Point RecBole to the train split WITHOUT overwriting
-    train_file = os.path.join(config['data_path'], f"{config['dataset']}_train.inter")
+    original_dataset_name = config['dataset']  # Save for later use (loading .item file)
+    train_file = os.path.join(config['data_path'], f"{original_dataset_name}_train.inter")
     
     if os.path.exists(train_file):
         # Change config to point directly to train split
         # RecBole will look for {dataset}.inter, so we change the dataset name
         print(f"RecBole will use train split: {train_file}")
-        print(f"Original file {config['dataset']}.inter will NOT be modified")
-        config['dataset'] = f"{config['dataset']}_train"
+        print(f"Original file {original_dataset_name}.inter will NOT be modified")
+        config['dataset'] = f"{original_dataset_name}_train"
     else:
         print(f"No train split found, using original dataset")
     
@@ -391,7 +392,7 @@ if __name__ == '__main__':
         else:
             # Use TF-IDF features (legacy approach)
             logger.info("Using TF-IDF for similarity")
-            item_features = load_item_features(config['dataset'], config['data_path'])
+            item_features = load_item_features(original_dataset_name, config['data_path'])
             
             if item_features is not None:
                 item_mapper, valid_inv_mapper, sim_cosine_valid = setup_item_similarity_tfidf(
