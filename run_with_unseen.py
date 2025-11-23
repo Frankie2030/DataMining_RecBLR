@@ -36,7 +36,7 @@ from plot_utils import parse_log_text, generate_plots
 
 def prepare_data_split(config):
     """
-    1. Filter to last 1/8 of data by timestamp
+    1. Filter to last 1/8 of data by timestamp (currently removed)
     2. Split data into train/test by users (80/20 split)
     3. Returns test_df for manual evaluation
     Does NOT overwrite original files.
@@ -71,15 +71,15 @@ def prepare_data_split(config):
     ts_col = next((c for c in df.columns if 'timestamp' in c.lower()), None)
     
     # Filter to last 1/8 of data by timestamp (like notebook but 1/8 instead of 1/64)
-    print(f"Original data: {len(df)} interactions")
-    df = df.sort_values(by=ts_col)
-    size = len(df)
-    df = df.iloc[-size//8:]  # Take last 1/8
-    print(f"After filtering to last 1/8: {len(df)} interactions")
+    # print(f"Original data: {len(df)} interactions")
+    # df = df.sort_values(by=ts_col)
+    # size = len(df)
+    # df = df.iloc[-size//8:]  # Take last 1/8
+    # print(f"After filtering to last 1/8: {len(df)} interactions")
     
     # Split users 80/20
     all_users = df[user_col].unique()
-    train_users, test_users = train_test_split(all_users, test_size=0.2, random_state=42)
+    train_users, test_users = train_test_split(all_users, test_size=0.1, random_state=42)
     
     train_df = df[df[user_col].isin(train_users)]
     test_df = df[df[user_col].isin(test_users)]
