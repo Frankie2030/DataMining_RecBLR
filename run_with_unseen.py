@@ -248,14 +248,36 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='Run RecBLR with unseen item handling.')
     parser.add_argument('--model', type=str, default='R', choices=['B', 'R', 'S'],
                         help='Model to use: B for Bert4Rec, R for RecBLR (default: R), S for SASRec')
-    parser.add_argument('--mode', type=str, default='both',
+    parser.add_argument('--mode', type=str, default=None,
                         choices=['none', 'pre', 'post', 'both'],
                         help='Unseen handling mode: none (no handling), pre, post, or both')
+    parser.add_argument('--exp', type=str, default=None,
+                        help='Experiment type: "unseen" to run all 4 modes')
     parser.add_argument('--n_components', type=int, default=16,
                         help='Number of PCA components for item similarity (default: 16)')
     parser.add_argument('--skip_item_features', action='store_true',
                         help='Skip creating item features (will fail for datasets without features)')
     args = parser.parse_args()
+    
+    # Check if we should run all modes
+    if args.exp == 'unseen' and args.mode is None:
+        # Run all 4 modes
+        import subprocess
+        import sys
+        modes = ['none', 'pre', 'post', 'both']
+        print(f"Running all modes: {modes}")
+        for mode in modes:
+            print(f"\n{'='*80}\nRUNNING MODE: {mode}\n{'='*80}\n")
+            cmd = [sys.executable, __file__, '--model', args.model, '--mode', mode, 
+                   '--n_components', str(args.n_components)]
+            if args.skip_item_features:
+                cmd.append('--skip_item_features')
+            subprocess.run(cmd)
+        sys.exit(0)
+    
+    # Set default mode if not specified
+    if args.mode is None:
+        args.mode = 'both'
 
     # Only RecBLR supports unseen handling with our implementation
     if args.model != 'R':
@@ -564,14 +586,25 @@ if __name__ == '__main__':
             # UNLESS `row["item_id_list"]` was constructed to EXCLUDE the last item?
             # In cell 37: `to_valid_list(item_list)` iterates `range(len(item_list)-1)`.
             # AHA! `range(len(item_list)-1)` excludes the last item!
-            # So `item_id_list` in H&M notebook IS `sequence[:-1]`.
+            seq_ids = row["item_id_list"]
+            if len(seq_ids) == 0:
+                continue
             
-            # So we must do the same: Input is sequence[:-1], Target is sequence[-1].
+            # IMPORTANT: Get target from ORIGINAL sequence, not processed item_id_list
+            # item_id_list was created from sequence[:-1], so we need sequence[-1] as target
+            true_item_token = row["sequence"][-1]
             
-            input_seq = seq_ids[:-1]
-            target_item = seq_ids[-1] # This is the ID of the target (mapped or raw?)
-            # H&M notebook uses `true_item = row["sequence"][-1]` (RAW token) for ground truth.
-            # And maps it to ID for metric calculation.
+            # Convert target token to ID
+            try:
+                target_id = dataset.token2id(dataset.iid_field, true_item_token)
+            except ValueError:
+                # Target item is unseen - skip this user
+                # (In mode=pre, this shouldn't happen often since we map unseen items)
+                # (In mode=none, this will happen for ~25% of users)
+                continue
+                
+            # Input: use the full processed sequence as input
+            input_seq = seq_ids
             
             if len(input_seq) == 0:
                 continue
@@ -591,16 +624,6 @@ if __name__ == '__main__':
             k = 10
             topk_indices = np.argpartition(scores, -k)[-k:]
             topk_indices = topk_indices[np.argsort(scores[topk_indices])[::-1]]
-            
-            # Calculate Ground Truth ID
-            # We need the ID of the true item.
-            # If the true item was unseen, it might be mapped to a valid ID in our `seq_ids`?
-            # No, `seq_ids` comes from `item_id_list_tokens` which was mapped.
-            # So `target_item` is the ID of the mapped true item.
-            # H&M notebook: `true_item = convert2valid(true_item) if ... else true_item`
-            # So yes, we evaluate against the MAPPED target if it was unseen.
-            
-            target_id = target_item
             
             # Hit@10
             hit = 1 if target_id in topk_indices else 0
