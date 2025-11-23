@@ -177,6 +177,16 @@ def prepare_hm_data(config):
     
     if not os.path.exists(inter_file):
         raise FileNotFoundError(f"Interaction file not found: {inter_file}")
+    
+    # Backup/restore mechanism to prevent double-splitting
+    original_backup = inter_file.replace('.inter', '_ORIGINAL.inter')
+    
+    if os.path.exists(original_backup):
+        print(f"Restoring original data from {original_backup}...")
+        shutil.copy(original_backup, inter_file)
+    else:
+        print(f"Backing up original data to {original_backup}...")
+        shutil.copy(inter_file, original_backup)
         
     # Read data
     print(f"Reading {inter_file}...")
