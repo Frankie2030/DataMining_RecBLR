@@ -207,9 +207,6 @@ def evaluate_with_preprocessing(model, test_sequence, dataset, device, mode='pre
     
     with torch.no_grad():
         for i, row in test_sequence.iterrows():
-            if i % 1000 == 0:
-                print(f"Processed {i}/{len(test_sequence)} users")
-            
             # Convert item tokens to IDs
             try:
                 item_id_list = np.array([dataset.token2id(dataset.iid_field, row["item_id_list"])])
