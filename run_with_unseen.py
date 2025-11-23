@@ -39,7 +39,7 @@ def prepare_data_split(config):
     1. Filter to last 1/8 of data by timestamp
     2. Split data into train/test by users (80/20 split)
     3. Returns test_df for manual evaluation
-    Does NOT overwrite original files.
+    Does NOT modify any original files.
     """
     print("Preparing data split...")
     
@@ -61,7 +61,7 @@ def prepare_data_split(config):
         
         return test_df, user_col, item_col, ts_col
     
-    # Read original data
+    # Read original data directly (never modify it)
     print(f"Reading original data from {inter_file}...")
     df = pd.read_csv(inter_file, sep='\t')
     
@@ -87,7 +87,7 @@ def prepare_data_split(config):
     print(f"Train: {len(train_df)} interactions, {len(train_users)} users")
     print(f"Test: {len(test_df)} interactions, {len(test_users)} users")
     
-    # Save splits to separate files (DO NOT overwrite original)
+    # Save splits to NEW files (never overwrite original)
     print(f"Saving train split to {train_file}...")
     train_df.to_csv(train_file, sep='\t', index=False)
     
@@ -330,21 +330,17 @@ if __name__ == '__main__':
     # ========================================================================
     test_df, user_col, item_col, ts_col = prepare_data_split(config)
     
-    # Point RecBole to the train split
+    # Point RecBole to the train split WITHOUT overwriting
     train_file = os.path.join(config['data_path'], f"{config['dataset']}_train.inter")
+    
     if os.path.exists(train_file):
-        # Temporarily rename files so RecBole loads the train split
-        original_file = os.path.join(config['data_path'], f"{config['dataset']}.inter")
-        backup_file = os.path.join(config['data_path'], f"{config['dataset']}_original.inter")
-        
-        # Backup original if not already backed up
-        if not os.path.exists(backup_file):
-            os.rename(original_file, backup_file)
-        
-        # Copy train split to main file for RecBole
-        import shutil
-        shutil.copy(train_file, original_file)
+        # Change config to point directly to train split
+        # RecBole will look for {dataset}.inter, so we change the dataset name
         print(f"RecBole will use train split: {train_file}")
+        print(f"Original file {config['dataset']}.inter will NOT be modified")
+        config['dataset'] = f"{config['dataset']}_train"
+    else:
+        print(f"No train split found, using original dataset")
     
     # ========================================================================
     # Model training (notebook cells 14-15)
