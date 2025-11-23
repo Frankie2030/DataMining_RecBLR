@@ -479,7 +479,9 @@ if __name__ == '__main__':
                 if item not in valid_items_set_check:
                     mapping_stats['original_unseen'] += 1
                     mapping_stats['mapped'] += 1
-                valid_list.append(convert2valid(item))
+                    valid_list.append(convert2valid(item))
+                else:
+                    valid_list.append(item)
             return ['[PAD]'] if len(valid_list) == 0 else valid_list
         
         test_sequence["item_id_list_tokens"] = test_sequence["sequence"].apply(to_valid_list)
