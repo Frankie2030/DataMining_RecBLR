@@ -357,7 +357,9 @@ if __name__ == '__main__':
     item_mapper = None
     valid_mapper = None
     sim_cosine_valid = None
+    sim_cosine_all = None
     convert2valid = None
+    weighted_similarity = None
     
     if args.model == 'R' and args.mode != 'none' and not args.skip_item_features:
         logger.info("\n" + "="*80)
@@ -410,6 +412,22 @@ if __name__ == '__main__':
             logger.info(f"Computing cosine similarity matrix ({len(item_features)} x {len(valid_ids)})...")
             sim_cosine_valid = cosine_similarity(X, X_valid)
             
+            # For postprocessing: also compute all items vs all items similarity
+            if args.mode in ['post', 'both']:
+                logger.info(f"Computing full similarity matrix ({len(item_features)} x {len(item_features)}) for postprocessing...")
+                sim_cosine_all = cosine_similarity(X, X)
+                
+                # Setup weighted similarity function (H&M notebook cell 47)
+                non_valid_ids = [item_mapper[item] for item in item_mapper.keys() if item not in valid_items_set]
+                sim_scores = sim_cosine_valid[non_valid_ids] / np.sum(sim_cosine_valid[non_valid_ids], axis=1).reshape(-1, 1)
+                
+                def weighted_similarity(initial_scores):
+                    """Extend scores from valid items to all items via similarity"""
+                    final_scores = np.zeros((X.shape[0]))
+                    final_scores[valid_ids] = initial_scores
+                    final_scores[non_valid_ids] = np.dot(sim_scores, initial_scores)
+                    return final_scores
+            
             # Create conversion function (H&M style)
             @lru_cache(maxsize=2048)
             def convert2valid(item):
@@ -429,7 +447,7 @@ if __name__ == '__main__':
             if args.mode in ['pre', 'both']:
                 logger.info("  - Preprocessing: Will map unseen items to similar valid items")
             if args.mode in ['post', 'both']:
-                logger.info("  - Postprocessing: Not implemented yet (would extend predictions)")
+                logger.info("  - Postprocessing: Will extend predictions to all items via similarity")
                 
         else:
             logger.warning("No item features available - skipping unseen handling")
@@ -444,12 +462,7 @@ if __name__ == '__main__':
 
     # model evaluation
     logger.info("\n" + "="*80)
-    logger.info("Evaluation phase")
-    logger.info("="*80)
-
-    # model evaluation
-    logger.info("\n" + "="*80)
-    logger.info("Evaluation phase (Custom H&M Style)")
+    logger.info("Evaluation phase (H&M Style)")
     logger.info("="*80)
 
     # Prepare test sequences from test_df
@@ -467,16 +480,17 @@ if __name__ == '__main__':
         # Track how many items were mapped
         mapping_stats = {'original_unseen': 0, 'total': 0, 'mapped': 0}
         valid_items_set_check = set(dataset.id2token(dataset.iid_field, range(1, dataset.item_num)))
+        valid_articles = list(valid_items_set_check)  # For notebook compatibility
         
         # H&M-style: map sequence[:-1] to valid items, keep last item as target
         def to_valid_list(item_list):
-            """Map unseen items to similar valid items (H&M style)"""
+            """Map unseen items to similar valid items (H&M style - notebook cell 37)"""
             valid_list = []
             # Map all items except the last one (which is the target)
             for i in range(len(item_list) - 1):
                 item = item_list[i]
                 mapping_stats['total'] += 1
-                if item not in valid_items_set_check:
+                if item not in valid_articles:
                     mapping_stats['original_unseen'] += 1
                     mapping_stats['mapped'] += 1
                     valid_list.append(convert2valid(item))
@@ -484,7 +498,7 @@ if __name__ == '__main__':
                     valid_list.append(item)
             return ['[PAD]'] if len(valid_list) == 0 else valid_list
         
-        test_sequence["item_id_list_tokens"] = test_sequence["sequence"].apply(to_valid_list)
+        test_sequence["item_id_list"] = test_sequence["sequence"].apply(to_valid_list)
         
         # Report mapping statistics
         if mapping_stats['original_unseen'] > 0:
@@ -493,158 +507,117 @@ if __name__ == '__main__':
         else:
             print(f"Preprocessing: All {mapping_stats['total']} items were already in training vocabulary")
     else:
-        print("No preprocessing - using raw sequences (unseen items might be dropped/padded)")
+        print("No preprocessing - using raw sequences")
         # H&M style: use all items except last as input
-        test_sequence["item_id_list_tokens"] = test_sequence["sequence"].apply(
+        test_sequence["item_id_list"] = test_sequence["sequence"].apply(
             lambda seq: seq[:-1] if len(seq) > 1 else ['[PAD]']
         )
     
-    
-    # Convert tokens to IDs
-    print("Converting tokens to IDs...")
-    
-    # Track unseen items using a mutable list (avoids nonlocal)
-    stats = {'unseen': 0, 'total': 0}
-    
-    def tokens_to_ids(tokens):
-        ids = []
-        for t in tokens:
-            stats['total'] += 1
-            try:
-                # Try to convert token to ID
-                item_id = dataset.token2id(dataset.iid_field, t)
-                ids.append(item_id)
-            except ValueError:
-                # Token doesn't exist in vocabulary - skip it
-                stats['unseen'] += 1
-                pass
-        return ids
-
-    test_sequence["item_id_list"] = test_sequence["item_id_list_tokens"].apply(tokens_to_ids)
     test_sequence["item_length"] = test_sequence["item_id_list"].apply(len)
     
-    # Report unseen items
-    if stats['unseen'] > 0:
-        print(f"WARNING: Found {stats['unseen']}/{stats['total']} ({100*stats['unseen']/stats['total']:.2f}%) unseen items in test data")
-        print(f"These items were filtered out from sequences (may affect evaluation accuracy)")
-        print(f"Consider using --mode preprocessing/postprocessing/both to handle unseen items")
-    else:
-        print(f"All {stats['total']} items in test data are known (no unseen items)")
-    
-    
-    
-    # Evaluation Loop
+    # Evaluation Loop - Notebook style (cells 44 and 48)
     print(f"Evaluating on {len(test_sequence)} users...")
     model.eval()
     
-    # Metrics
-    from recbole.evaluator.metrics import Hit, NDCG, MRR
-    # We can use RecBole metrics or sklearn. Let's use sklearn to match H&M exactly if possible,
-    # or just implement simple Hit/NDCG calculation.
-    # H&M notebook uses ndcg_score from sklearn.
     from sklearn.metrics import ndcg_score
     
-    ndcg_10_scores = []
-    hit_10_scores = []
+    # Determine output shape based on mode
+    if args.mode in ['post', 'both'] and weighted_similarity is not None:
+        # Postprocessing: evaluate on ALL items (including unseen)
+        output_shape = (len(test_sequence), len(item_mapper))
+        print(f"Postprocessing mode: Evaluating on {len(item_mapper)} total items (including unseen)")
+    else:
+        # No postprocessing: evaluate only on valid items
+        output_shape = (len(test_sequence), dataset.item_num - 1)
+        print(f"No postprocessing: Evaluating on {dataset.item_num - 1} valid items only")
+    
+    y_scores = np.zeros(output_shape)
+    y_true = np.zeros(output_shape)
     
     device = config['device']
+    valid_eval_count = 0
     
     with torch.no_grad():
         for i, row in test_sequence.iterrows():
             if i % 1000 == 0:
                 print(f"Processed {i}/{len(test_sequence)} users")
-                
-            seq_ids = row["item_id_list"]
-            if len(seq_ids) == 0:
-                continue
-                
-            # Input: sequence excluding the last item (leave-one-out for prediction)
-            # OR H&M style: use full sequence to predict NEXT?
-            # H&M notebook: 
-            # true_item = row["sequence"][-1]
-            # item_id_list = ... (it seems they use the full sequence?)
-            # Let's check H&M notebook again.
-            # "item_id_list" in H&M notebook comes from "sequence".
-            # "sequence" is the list of ALL interactions for that user in the test set.
-            # Wait, test_df contains interactions.
-            # If a user has 5 interactions in test_df, do we predict the 6th?
-            # Or do we use 4 to predict 5th?
-            # H&M notebook:
-            # true_item = row["sequence"][-1]
-            # item_id_list = ... row["item_id_list"] ...
-            # It seems they use the WHOLE list as input?
-            # No, RecBole models usually take history.
-            # If they pass the whole list, the model might predict the *next* after the last.
-            # BUT `true_item` is the LAST item of the sequence.
-            # So they must be using `sequence[:-1]` as input?
-            # Let's look at H&M notebook cell 44 again carefully.
-            # item_id_list = np.array([dataset.token2id(dataset.iid_field, row["item_id_list"])])
-            # It uses the FULL list from the dataframe.
-            # AND `true_item = row["sequence"][-1]`.
-            # This implies the "sequence" column includes the target.
-            # If they pass the full list to the model, RecBole's `forward` typically processes the whole sequence.
-            # `full_sort_predict` typically uses the *last* state of the sequence to predict the *next* item.
-            # If the sequence includes the target, then we are predicting the item *after* the target.
-            # UNLESS `row["item_id_list"]` was constructed to EXCLUDE the last item?
-            # In cell 37: `to_valid_list(item_list)` iterates `range(len(item_list)-1)`.
-            # AHA! `range(len(item_list)-1)` excludes the last item!
-            seq_ids = row["item_id_list"]
-            if len(seq_ids) == 0:
-                continue
             
-            # IMPORTANT: Get target from ORIGINAL sequence, not processed item_id_list
-            # item_id_list was created from sequence[:-1], so we need sequence[-1] as target
-            true_item_token = row["sequence"][-1]
-            
-            # Convert target token to ID
+            # Convert item tokens to IDs (notebook cell 44)
             try:
-                target_id = dataset.token2id(dataset.iid_field, true_item_token)
-            except ValueError:
-                # Target item is unseen - skip this user
-                # (In mode=pre, this shouldn't happen often since we map unseen items)
-                # (In mode=none, this will happen for ~25% of users)
+                item_id_list = np.array([dataset.token2id(dataset.iid_field, row["item_id_list"])])
+            except (ValueError, KeyError):
+                # Skip if any item in sequence is not in vocabulary
                 continue
-                
-            # Input: use the full processed sequence as input
-            input_seq = seq_ids
             
-            if len(input_seq) == 0:
-                continue
-                
             interaction = {
-                "item_id_list": torch.LongTensor([input_seq]).to(device),
-                "item_length": torch.LongTensor([len(input_seq)]).to(device)
+                "item_id_list": torch.LongTensor(item_id_list).to(device),
+                "item_length": torch.LongTensor(np.array([row["item_length"]])).to(device)
             }
             
-            scores = model.full_sort_predict(interaction)[0] # [n_items]
+            scores = model.full_sort_predict(interaction)[0]
             scores = scores.cpu().detach().numpy()
             
-            # Mask the padding item (0)
-            scores[0] = -np.inf
+            # Get true target item
+            true_item = row["sequence"][-1]
             
-            # Get top K
-            k = 10
-            topk_indices = np.argpartition(scores, -k)[-k:]
-            topk_indices = topk_indices[np.argsort(scores[topk_indices])[::-1]]
-            
-            # Hit@10
-            hit = 1 if target_id in topk_indices else 0
-            hit_10_scores.append(hit)
-            
-            # NDCG@10
-            if hit:
-                rank = np.where(topk_indices == target_id)[0][0]
-                ndcg = 1.0 / np.log2(rank + 2)
+            # Apply postprocessing if enabled
+            if args.mode in ['post', 'both'] and weighted_similarity is not None:
+                # Notebook cell 48: Extend scores to all items
+                y_scores[i] = weighted_similarity(scores[1:])  # Skip padding item
+                
+                # Set ground truth
+                if true_item in item_mapper:
+                    true_item_id = item_mapper[true_item]
+                    y_true[i, true_item_id] = 1
+                    valid_eval_count += 1
+                else:
+                    # True item not in features at all - skip
+                    continue
             else:
-                ndcg = 0
-            ndcg_10_scores.append(ndcg)
-
-    avg_hit = np.mean(hit_10_scores)
-    avg_ndcg = np.mean(ndcg_10_scores)
+                # No postprocessing: use scores only for valid items
+                y_scores[i] = scores[1:]  # Skip padding item
+                
+                # Set ground truth - only if target is in training vocabulary
+                try:
+                    # If preprocessing was used, target might have been mapped
+                    if args.mode in ['pre', 'both'] and convert2valid is not None:
+                        if true_item not in valid_articles:
+                            true_item = convert2valid(true_item)
+                    
+                    true_item_id = dataset.token2id(dataset.iid_field, true_item) - 1
+                    y_true[i, true_item_id] = 1
+                    valid_eval_count += 1
+                except (ValueError, KeyError):
+                    # Target item is unseen and no preprocessing - skip this user
+                    continue
+    
+    # Compute metrics using sklearn (notebook style)
+    print(f"Computing metrics for {valid_eval_count} valid evaluations...")
+    
+    # Filter out rows where no valid target was found
+    valid_rows = y_true.sum(axis=1) > 0
+    y_true_filtered = y_true[valid_rows]
+    y_scores_filtered = y_scores[valid_rows]
+    
+    if len(y_true_filtered) > 0:
+        ndcg_10 = ndcg_score(y_true_filtered, y_scores_filtered, k=10)
+        
+        # Compute Hit@10 manually
+        hit_10_scores = []
+        for i in range(len(y_true_filtered)):
+            topk_indices = np.argpartition(y_scores_filtered[i], -10)[-10:]
+            true_indices = np.where(y_true_filtered[i] == 1)[0]
+            hit = 1 if len(np.intersect1d(topk_indices, true_indices)) > 0 else 0
+            hit_10_scores.append(hit)
+        hit_10 = np.mean(hit_10_scores)
+    else:
+        ndcg_10 = 0.0
+        hit_10 = 0.0
+        print("WARNING: No valid evaluations found!")
     
     test_result = {
-        'hit@10': avg_hit,
-        'ndcg@10': avg_ndcg
+        'hit@10': hit_10,
+        'ndcg@10': ndcg_10
     }
 
     environment_tb = get_environment(config)
