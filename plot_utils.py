@@ -100,7 +100,7 @@ def generate_plots(df, output_prefix=""):
     plt.legend()
     plt.grid(True)
     plt.tight_layout()
-    plt.savefig(f'{output_prefix}train_loss_plot.png')
+    plt.savefig(f'{output_prefix}__train_loss_plot.png')
     plt.clf()
 
     # Plot 2: Validation Score (NDCG@10)
@@ -111,7 +111,7 @@ def generate_plots(df, output_prefix=""):
     plt.legend()
     plt.grid(True)
     plt.tight_layout()
-    plt.savefig(f'{output_prefix}valid_score_plot.png')
+    plt.savefig(f'{output_prefix}__valid_score_plot.png')
     plt.clf()
 
     # Plot 3: Hit Rate
@@ -123,7 +123,7 @@ def generate_plots(df, output_prefix=""):
     plt.legend()
     plt.grid(True)
     plt.tight_layout()
-    plt.savefig(f'{output_prefix}hit_rate_plot.png')
+    plt.savefig(f'{output_prefix}__hit_rate_plot.png')
     plt.clf()
 
     # Plot 4: NDCG
@@ -135,7 +135,7 @@ def generate_plots(df, output_prefix=""):
     plt.legend()
     plt.grid(True)
     plt.tight_layout()
-    plt.savefig(f'{output_prefix}ndcg_plot.png')
+    plt.savefig(f'{output_prefix}__ndcg_plot.png')
     plt.clf()
 
     # Plot 5: MRR
@@ -147,7 +147,7 @@ def generate_plots(df, output_prefix=""):
     plt.legend()
     plt.grid(True)
     plt.tight_layout()
-    plt.savefig(f'{output_prefix}mrr_plot.png')
+    plt.savefig(f'{output_prefix}__mrr_plot.png')
     plt.clf()
 
     logging.info(f"Plots generated for {output_prefix}: train_loss_plot.png, valid_score_plot.png, hit_rate_plot.png, ndcg_plot.png, mrr_plot.png")

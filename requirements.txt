@@ -9,3 +9,6 @@ pandas
 matplotlib
 argparse
 psutil
+scipy
+scikit-learn
+tqdm
