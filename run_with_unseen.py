@@ -149,6 +149,7 @@ def setup_item_similarity(item_features, valid_items, n_components=16, seed=42):
     # TF-IDF transform
     vect = TfidfVectorizer()
     tfidf = vect.fit_transform(item_features["description"])
+    print(f"TF-IDF Vector Size: {tfidf.shape[1]}")
     X = csr_matrix(tfidf)
     
     # Dimensionality reduction
